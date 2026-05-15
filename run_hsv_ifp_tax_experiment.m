@@ -76,26 +76,39 @@ function results = run_hsv_ifp_tax_experiment()
 
     end
 
+    tax_revenue_norm = tax_revenue_grid / sol_bench.moments.tax_revenue;
+    Y_norm = Y_grid / sol_bench.moments.Y;
+    K_norm = K_grid / sol_bench.moments.K;
+
     experiment_table = table( ...
         tau_grid(:), ...
         lambda_grid, ...
         tax_revenue_grid, ...
+        tax_revenue_norm, ...
         K_grid, ...
+        K_norm, ...
         Y_grid, ...
+        Y_norm, ...
         C_grid, ...
         welfare_grid, ...
         success_grid, ...
-        'VariableNames', {'tau', 'lambda', 'tax_revenue', 'K', 'Y', 'C', ...
-                          'welfare', 'success'});
+        'VariableNames', {'tau', 'lambda', 'tax_revenue', ...
+                          'tax_revenue_norm', 'K', 'K_norm', 'Y', ...
+                          'Y_norm', 'C', 'welfare', 'success'});
 
     fprintf('\nRevenue-neutral experiment results:\n');
     disp(experiment_table)
+
+    fig_normalized_aggregates = plot_tax_experiment( ...
+        tau_grid(:), par.tax.tau, tax_revenue_norm, Y_norm, K_norm, ...
+        success_grid, par.experiment.figure_file);
 
     results.par = par;
     results.benchmark = sol_bench;
     results.target_revenue = target_revenue;
     results.experiment_table = experiment_table;
     results.sol_experiment = sol_experiment;
+    results.fig_normalized_aggregates = fig_normalized_aggregates;
 
 end %end function
 
@@ -164,6 +177,63 @@ function par = set_params()
     % Revenue-neutral experiment
     par.experiment.tau_grid = linspace(0.05, 0.30, 11);
     par.experiment.lambda_bracket = [0.05, 2.00];
+    par.experiment.figure_file = 'hsv_ifp_tax_experiment_normalized.png';
+
+end %end function
+
+
+function fig = plot_tax_experiment(tau_grid, tau_benchmark, tax_revenue_norm, ...
+    Y_norm, K_norm, success_grid, figure_file)
+%PLOT_TAX_EXPERIMENT Plot benchmark-normalized aggregates over tau.
+
+    fig = figure('Name', 'HSV IFP tax experiment', 'Color', 'w');
+    layout = tiledlayout(fig, 3, 1, ...
+        'TileSpacing', 'compact', 'Padding', 'compact');
+
+    plot_normalized_series(tau_grid, tau_benchmark, tax_revenue_norm, ...
+        success_grid, 'Total tax revenue');
+    plot_normalized_series(tau_grid, tau_benchmark, Y_norm, ...
+        success_grid, 'Aggregate output');
+    plot_normalized_series(tau_grid, tau_benchmark, K_norm, ...
+        success_grid, 'Aggregate capital');
+
+    title(layout, 'Revenue-neutral tax experiment');
+    xlabel(layout, 'Tax progressivity \tau');
+
+    if ~isempty(figure_file)
+        try
+            exportgraphics(fig, figure_file, 'Resolution', 200);
+            fprintf('\nSaved normalized aggregate plot to %s\n', figure_file);
+        catch export_error
+            warning('Could not save normalized aggregate plot: %s', ...
+                export_error.message);
+        end
+    end
+
+end %end function
+
+
+function plot_normalized_series(tau_grid, tau_benchmark, series, ...
+    success_grid, series_name)
+%PLOT_NORMALIZED_SERIES Plot one benchmark-normalized series.
+
+    nexttile
+
+    ok = success_grid(:) & isfinite(series(:));
+
+    plot(tau_grid(ok), series(ok), '-o', ...
+        'LineWidth', 1.5, ...
+        'MarkerSize', 5, ...
+        'MarkerFaceColor', [0.20, 0.45, 0.70], ...
+        'Color', [0.20, 0.45, 0.70]);
+    hold on
+    yline(1.0, 'k:', 'Benchmark', ...
+        'LabelHorizontalAlignment', 'left');
+    xline(tau_benchmark, 'k--', '\tau benchmark', ...
+        'LabelOrientation', 'horizontal');
+    grid on
+    ylabel(series_name);
+    xlim([min(tau_grid), max(tau_grid)]);
 
 end %end function
 
@@ -206,38 +276,37 @@ function [V, policy_ind, policy_a, policy_c] = solve_vfi(par)
     policy_a = zeros(Na, Nz);
     policy_c = zeros(Na, Nz);
 
+    cash_on_hand_grid = zeros(Na, Nz);
+    utility_choices = cell(Nz, 1);
+
+    for iz = 1:Nz
+
+        y_pre_tax = par.r * a_grid + par.w * z_grid(iz);
+        y_after_tax = hsv_after_tax_income( ...
+            y_pre_tax, par.tax.lambda, par.tax.tau);
+
+        cash_on_hand_grid(:, iz) = a_grid + y_after_tax;
+        c_choices = cash_on_hand_grid(:, iz) - a_grid';
+        utility_choices{iz} = utility(c_choices, par.sigma);
+
+    end
+
     diff = Inf;
 
     for iter = 1:par.vfi.max_iter
 
-        for iz = 1:Nz
+        parfor iz = 1:Nz
 
             EV = V * Pz(iz, :)';
 
-            z = z_grid(iz);
+            rhs = utility_choices{iz} + beta * EV';
 
-            for ia = 1:Na
+            [V_col, best_ind] = max(rhs, [], 2);
 
-                a = a_grid(ia);
-
-                y_pre_tax = par.r * a + par.w * z;
-                y_after_tax = hsv_after_tax_income(y_pre_tax, par.tax.lambda, par.tax.tau);
-
-                cash_on_hand = a + y_after_tax;
-
-                c_vec = cash_on_hand - a_grid;
-
-                u_vec = utility(c_vec, par.sigma);
-
-                rhs = u_vec + beta * EV;
-
-                [V_new(ia, iz), best_ind] = max(rhs);
-
-                policy_ind(ia, iz) = best_ind;
-                policy_a(ia, iz) = a_grid(best_ind);
-                policy_c(ia, iz) = c_vec(best_ind);
-
-            end
+            V_new(:, iz) = V_col;
+            policy_ind(:, iz) = best_ind;
+            policy_a(:, iz) = a_grid(best_ind);
+            policy_c(:, iz) = cash_on_hand_grid(:, iz) - a_grid(best_ind);
 
         end
 
